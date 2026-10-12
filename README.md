@@ -25,6 +25,8 @@
 
 用自己的日线 parquet 可以复现：`python examples/04_naive_vs_real.py bars.parquet --out chart.png`。数据不随仓库提供。
 
+这类问题还有很多。配套的 [《A 股回测避坑手册》](https://issac250.github.io/ashare-backtest-pitfalls/)（[仓库](https://github.com/Issac250/ashare-backtest-pitfalls)）整理了 12 个，每个都附一个能直接运行的最小复现，复现用的就是这个引擎。
+
 可以用它做几件事：
 
 - **测自己的信号**：只需要股票评分和日线数据，不用把策略改写成事件回调。
@@ -177,5 +179,7 @@ pytest -q -W error::FutureWarning
 ## 许可证
 
 [MIT](LICENSE)。
+
+相关项目：[《A 股回测避坑手册》](https://github.com/Issac250/ashare-backtest-pitfalls)，用本引擎复现 12 个常见的回测偏差。
 
 如果这个项目对你有用，欢迎点个 Star。数据接入或回测结果有问题，可以在 [Issues](https://github.com/Issac250/ashare-bt/issues) 里附上最小复现。
