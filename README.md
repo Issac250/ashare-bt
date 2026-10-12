@@ -6,7 +6,7 @@
 
 **Why.** Most A-share backtests are optimistic in the same few ways: they trade at the close they used to decide, buy stocks that opened locked at limit-up, sell the same day they bought (T+1), ignore the ¥5 minimum commission and 100-share lots, book splits as losses, and let delisted stocks freeze capital. Each of these is a rule here, with a test that fails if it is broken.
 
-**Results.** 94 tests on synthetic panels, one per venue rule: next-open execution, open-based limit gates, T+1, whole lots, participation cap and market impact, historical stamp duty back to 2001, total-return position accounting through splits and dividends, forced liquidation on delisting, and a capital-capacity sweep.
+**Results.** 100 tests on synthetic panels, one per venue rule: next-open execution, open-based limit gates, T+1, whole lots, participation cap and market impact, historical stamp duty back to 2001, total-return position accounting through splits and dividends, forced liquidation on delisting, and a capital-capacity sweep.
 
 ```bash
 git clone https://github.com/Issac250/ashare-bt && cd ashare-bt
@@ -72,6 +72,7 @@ A 股回测最常见的高估，几乎都来自"这笔单子其实成交不了"�
 
 - `cagr` 按日历时间计算：年数 = 天数 / 365.25。A 股一年约 243 个交易日，用 交易日数 / 252 会高估 CAGR。
 - `sharpe` 是日收益的算术均值 × 252 ÷ 年化波动，无风险利率取 0。CAGR / 波动是另一个量，不叫 Sharpe。
+- 波动和 Sharpe 按 √252 年化，这是行业通用口径，方便和外部数字比较。A 股实际一年约 243.6 个交易日，按这个数年化会让 Sharpe 低约 1.7%。CAGR 和闲置资金利息用的是日历时间和 243.6 天，因为它们是时间量，不是统计量。
 
 ### 示例
 

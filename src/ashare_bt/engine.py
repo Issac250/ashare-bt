@@ -191,12 +191,14 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
     cfg = cfg or BacktestConfig()
     if not cfg.long_only:
         raise NotImplementedError("short side omitted: individual A-share shorting is impractical")
-    if "open_limit_up" not in bars.columns and "at_limit_up" in bars.columns:
-        raise ValueError(
-            "bars has `at_limit_up` but the engine reads `open_limit_up`: rename the "
-            "columns, and make sure they describe the OPEN, not the close. A "
-            "close-based flag is a look-ahead for an order that fills at the open."
-        )
+    for side in ("up", "down"):
+        old, new = f"at_limit_{side}", f"open_limit_{side}"
+        if new not in bars.columns and old in bars.columns:
+            raise ValueError(
+                f"bars has `{old}` but the engine reads `{new}`: rename the "
+                "columns, and make sure they describe the OPEN, not the close. A "
+                "close-based flag is a look-ahead for an order that fills at the open."
+            )
     missing = [c for c in REQUIRED_BARS if c not in bars.columns]
     if missing:
         raise ValueError(f"bars is missing columns {missing}; see run_backtest's docstring")
@@ -207,7 +209,9 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
     # "unknown" must never be read as "tradable" or "not at a limit".
     for col, default in (("tradable", False), ("open_limit_up", True), ("open_limit_down", True)):
         if col in bars.columns:
-            bars[col] = bars[col].fillna(default).astype(bool)
+            # np.where, not fillna: fillna on an object column with None in it
+            # triggers pandas' downcasting FutureWarning on 2.x.
+            bars[col] = np.where(bars[col].isna(), default, bars[col]).astype(bool)
     signal = signal.copy()
     signal["date"] = pd.to_datetime(signal["date"])
     if exposure is not None:
@@ -567,5 +571,8 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
     daily = pd.DataFrame(rows).set_index("date").sort_index()
     if daily.empty:
         raise ValueError("backtest produced no days")
-    equity = daily["equity"]
+    # The curve starts at the capital on the first signal date, so the first
+    # execution day's costs and return are inside every metric.
+    equity = pd.concat([pd.Series([float(cfg.capital)], index=[sig_days[0]]), daily["equity"]])
+    equity.name = "equity"
     return BacktestResult(equity, daily, pd.DataFrame(trade_rows), cfg, _metrics(equity, daily, cfg))

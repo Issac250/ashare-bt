@@ -56,3 +56,21 @@ def test_engine_charges_buy_side_duty_in_2007():
 def test_engine_charges_no_buy_side_duty_in_2024():
     buy = _first_buy("2024-03-01", CostModel(historical_stamp_duty=True, **ZERO))
     assert buy["cost"] == pytest.approx(0.0)
+
+
+def test_historical_mode_refuses_an_explicit_stamp_duty():
+    with pytest.raises(ValueError, match="stamp_duty"):
+        CostModel(historical_stamp_duty=True, stamp_duty=0.0)
+
+
+def test_historical_model_needs_a_date_before_it_can_price_a_trade():
+    m = CostModel(historical_stamp_duty=True)
+    with pytest.raises(ValueError, match="on\\(date\\)"):
+        m.trade_cost(100_000, is_sell=True)
+    dated = m.on("2007-06-01")
+    assert dated.trade_cost(100_000, is_sell=False) > CostModel(stamp_duty=0.0).trade_cost(100_000, is_sell=False)
+
+
+def test_engine_refuses_a_trade_before_the_schedule():
+    with pytest.raises(ValueError, match="2001-11-16"):
+        _first_buy("2001-10-01", CostModel(historical_stamp_duty=True, **ZERO))

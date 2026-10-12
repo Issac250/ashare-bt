@@ -44,7 +44,14 @@ class CostModel:
     slippage_bps: float = 5.0          # baseline half-spread on top of impact
     impact_coef: float = 0.10          # impact = coef * participation_rate
     stamp_duty_buy: float = 0.0        # buy side; non-zero only before 2008-09-19
-    historical_stamp_duty: bool = False
+    historical_stamp_duty: bool = False  # take both rates from STAMP_DUTY_SCHEDULE by trade date
+
+    def __post_init__(self) -> None:
+        # The schedule replaces both rates, so an explicit one would be ignored
+        # without a word -- e.g. stamp_duty=0 for convertible bonds.
+        if self.historical_stamp_duty and (self.stamp_duty != 0.0005 or self.stamp_duty_buy != 0.0):
+            raise ValueError("historical_stamp_duty=True takes stamp_duty and stamp_duty_buy from "
+                             "the schedule; leave them at their defaults")
 
     def trade_cost(self, notional: float, is_sell: bool, participation: float = 0.0) -> float:
         """Cost in ¥ for one order.
@@ -52,6 +59,9 @@ class CostModel:
         `participation` is the order's share of that day's ¥ turnover; impact
         grows with it, which is what makes capacity bite as size increases.
         """
+        if self.historical_stamp_duty:
+            raise ValueError("a historical_stamp_duty model has no rate until it is dated: "
+                             "call .on(date) first")
         if notional <= 0:
             return 0.0
         commission = max(notional * self.commission_rate, self.commission_min)
@@ -66,7 +76,7 @@ class CostModel:
         if not self.historical_stamp_duty:
             return self
         buy, sell = stamp_duty_on(date)
-        return replace(self, stamp_duty=sell, stamp_duty_buy=buy)
+        return replace(self, stamp_duty=sell, stamp_duty_buy=buy, historical_stamp_duty=False)
 
     def round_trip_bps(self, notional: float, participation: float = 0.0) -> float:
         """Convenience: full in-and-out cost in basis points of notional."""

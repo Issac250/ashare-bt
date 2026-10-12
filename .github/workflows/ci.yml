@@ -11,5 +11,15 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv venv --python ${{ matrix.python }}
       - run: uv pip install -e ".[dev]"
-      - run: uv run ruff check .
-      - run: uv run pytest -q
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync pytest -q -W error::FutureWarning
+  lower-bounds:
+    # The oldest versions pyproject.toml promises to support.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.11
+      - run: uv pip install "pandas==2.2.*" "numpy==1.26.*" pytest
+      - run: uv pip install --no-deps -e .
+      - run: uv run --no-sync pytest -q -W error::FutureWarning

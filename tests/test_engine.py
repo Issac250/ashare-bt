@@ -628,7 +628,7 @@ def test_an_event_rule_buys_holds_and_returns_to_cash():
     # by 252 understates `years` and overstates CAGR. A side effect is that a
     # calendar span cannot be inflated by dropping dates from the MIDDLE of the
     # curve, which is the failure mode the comment above describes.
-    span = (pd.Timestamp(days[-1]) - pd.Timestamp(days[1])).days
+    span = (pd.Timestamp(days[-1]) - pd.Timestamp(days[0])).days   # the curve starts at the signal date
     assert abs(res.metrics["years"] - span / 365.25) < 1e-9
     # Genuinely flat in cash when nothing qualifies.
     assert (d["n_positions"] == 0).sum() == 19
@@ -730,3 +730,14 @@ def test_sharpe_is_the_arithmetic_daily_sharpe():
     r = res.equity.pct_change().dropna()
     assert res.metrics["sharpe"] == pytest.approx(r.mean() * 252 / (r.std() * np.sqrt(252)))
     assert "cagr_over_vol" not in res.metrics
+
+
+def test_the_curve_starts_at_the_capital_so_day_one_costs_count():
+    """Buying on the first execution day costs money; that day must be inside total_return."""
+    bars = make_bars({"A": flat_series("A", 10.0)})
+    signal = pd.DataFrame({"date": [DATES[0]], "code": ["A"], "score": [1.0]})
+    signal = pd.concat([signal, pd.DataFrame({"date": DATES[1:], "code": "A", "score": 1.0})])
+    res = run_backtest(signal, bars, BacktestConfig(capital=1_000_000, n_positions=1, rebalance_days=99))
+    assert res.equity.iloc[0] == 1_000_000
+    assert res.equity.index[0] == pd.Timestamp(DATES[0])
+    assert res.metrics["total_return"] == pytest.approx(-res.trades["cost"].sum() / 1_000_000)
