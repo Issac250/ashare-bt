@@ -1,89 +1,162 @@
-# ashare-bt
+# ashare-bt：A 股日线回测
 
 [![ci](https://github.com/Issac250/ashare-bt/actions/workflows/ci.yml/badge.svg)](https://github.com/Issac250/ashare-bt/actions/workflows/ci.yml)
 
-**What.** A cross-sectional backtester for China A-shares that only fills the orders the exchange would actually have filled.
+把选股分数和日线行情传进来，按下一交易日开盘调仓，输出净值、交易记录和回测指标。基于 pandas，适合已有选股逻辑、想单独检查组合表现的人。
 
-**Why.** Most A-share backtests are optimistic in the same few ways: they trade at the close they used to decide, buy stocks that opened locked at limit-up, sell the same day they bought (T+1), ignore the ¥5 minimum commission and 100-share lots, book splits as losses, and let delisted stocks freeze capital. Each of these is a rule here, with a test that fails if it is broken.
+收盘选出的股票，第二天可能涨停买不进；资金分到每只股票后，可能连一手都不够。这些约束，以及最低佣金、滑点和成交额限制，都在回测里计算。
 
-**Results.** 100 tests on synthetic panels, one per venue rule: next-open execution, open-based limit gates, T+1, whole lots, participation cap and market impact, historical stamp duty back to 2001, total-return position accounting through splits and dividends, forced liquidation on delisting, and a capital-capacity sweep.
+可以用它做几件事：
+
+- **测自己的信号**：只需要股票评分和日线数据，不用把策略改写成事件回调。
+- **看成交假设的影响**：同一信号，比较收盘成交、加费用、下一开盘成交的结果。
+- **试资金容量**：从 10 万跑到 1 亿，看成本和闲置现金怎么变化。
+
+需要 Python 3.11+。核心依赖只有 NumPy 和 pandas；下面的示例用合成数据，装好就能跑。成交仍是日线近似，无法模拟开盘集合竞价的排队和部分成交。
+
+## 先跑一遍
 
 ```bash
-git clone https://github.com/Issac250/ashare-bt && cd ashare-bt
+git clone https://github.com/Issac250/ashare-bt
+cd ashare-bt
 pip install -e .
 python examples/01_quickstart.py
 ```
 
----
+```python
+from ashare_bt import BacktestConfig, run_backtest
+from ashare_bt.synthetic import make_market, make_signal
 
-## 中文说明
+bars = make_market(n_stocks=100, n_days=750, seed=7)
+signal = make_signal(bars, kind="momentum", lookback=20)
+config = BacktestConfig(capital=1_000_000, n_positions=20, rebalance_days=5)
 
-### 它解决什么问题
+result = run_backtest(signal, bars, config)
+print(result.summary())
+print(result.trades.head())
+```
 
-A 股回测最常见的高估，几乎都来自"这笔单子其实成交不了"。下面每一条在本引擎里都是一条规则，各自有测试守着：
+运行上面的配置，摘要里会看到这些数值（合成行情，固定随机种子）：
 
-| 如果不处理 | 回测会多算什么 |
+```text
+period........... 2020-01-29 -> 2022-11-16 (2.8y)
+total return.....    -5.9%
+CAGR.............    -2.1%
+max drawdown.....   -16.7%
+cost drag / yr...    4.33%
+```
+
+这组数据只是用来跑通流程，没有内置的盈利策略。换成自己的信号和行情后，可以直接取：
+
+- `result.equity`：净值序列（pandas Series）。
+- `result.daily`：每日权益、现金、持仓数、费用和成交金额。
+- `result.trades`：每笔交易的日期、代码、方向、金额和费用。
+- `result.metrics`：收益率、Sharpe、回撤等指标。
+
+## 数据怎么接
+
+拿到一个选股信号后，可以先用合成数据把流程跑通，再换成自己的日线数据。引擎只接收 pandas DataFrame，不依赖数据库或行情服务。
+
+`signal` 每行是一只股票在一个信号日的评分：
+
+| 列 | 含义 |
 |---|---|
-| 用当天收盘价决策、又按当天收盘价成交 | 用到了成交时还不知道的价格；本引擎在信号日 t 的**下一个交易日开盘**成交 |
-| 开盘一字涨停照样买进 | 买到实际排不上队的股票，正好是之后最强的那批 |
-| 用**收盘**是否涨停来判断开盘能否买入 | 反过来拒绝了开盘正常、收盘才涨停的股票，同样是未来函数 |
-| 当天买当天卖 | 违反 T+1，高估短线策略 |
-| 忽略整手和 ¥5 最低佣金 | 小资金下每笔小单的真实成本被严重低估 |
-| 用不复权价格乘持股数计算市值 | 送转、拆股被记成暴跌，分红被记成亏损 |
-| 退市股按最后价格一直挂着 | 资金被冻结在不存在的股票里，掩盖退市风险 |
+| `date` | 信号日 |
+| `code` | 股票代码，与 `bars` 一致 |
+| `score` | 分数越高，排名越靠前；空值不参与选股 |
+| `w`（可选） | 相对仓位权重；不传时等权 |
 
-### 输入
+`bars` 需要这些列：
 
-- `signal`：`[date, code, score]`，分数越高越想买；可选 `w` 列设定相对权重。
-- `bars`：`[date, code, open, close, preclose, amount, tradable, open_limit_up, open_limit_down]`（`ret` 可选，引擎不读，`make_signal` 会用）
-  - `open_limit_up` / `open_limit_down` 必须描述**开盘**时是否在涨跌停。传入旧字段名 `at_limit_up` 会直接报错，提醒你检查口径。涨跌停价按交易所规则四舍五入到分，可用 `ashare_bt.sizing.limit_prices(preclose, width)` 计算；直接用浮点 `round` 会把 27.95 × 1.1 = 30.745 算成 30.74。
-  - `preclose` 必须是除权后的昨收（baostock 的 `preclose` 已经除权），`open / preclose` 就是隔夜的总收益。
-  - 涨跌停字段为空时按"在涨跌停"处理：不能买，也不能卖。
+| 列 | 含义 |
+|---|---|
+| `date`, `code` | 交易日、股票代码 |
+| `open`, `close` | 未复权开盘价、收盘价 |
+| `preclose` | 当日除权口径的昨收，用来计算隔夜收益 |
+| `amount` | 当日成交额，单位元 |
+| `tradable` | 当日是否可交易 |
+| `open_limit_up`, `open_limit_down` | 开盘时是否在涨停、跌停价 |
 
-### 成交规则
+`ret` 不是引擎的必需列，但示例里的 `make_signal` 用它计算动量。
 
-| 规则 | 默认 | 配置 |
+涨跌停标记要看开盘。开盘正常、收盘才涨停的股票，不能因为收盘结果被排除。旧字段名 `at_limit_up` / `at_limit_down` 会报错，避免把收盘口径直接带进来。标记为空时，引擎会阻止对应方向的交易；`tradable` 为空则按不可交易处理。
+
+可以用 `ashare_bt.sizing.limit_prices(preclose, width)` 算涨跌停价。它按分做四舍五入，处理了 `27.95 × 1.1 = 30.745` 这类浮点舍入问题。`width` 要按股票和日期提供，不能把全市场都设成 10%。
+
+`preclose` 的口径也要确认：引擎用 `open / preclose` 和 `close / open` 推进持仓价值。除权日如果传了未经调整的昨收，送转就会被算成价格下跌。这里按收益率记持仓价值，没有逐笔维护分红现金和送转后的股数。
+
+运行期间每个交易日都要有信号记录。引擎只遍历输入的信号日；稀疏事件信号需要先补齐日期，才能逐日估值和检查退出。
+
+## 回测里的交易约定
+
+信号日 t 的订单在下一交易日开盘执行。每次调仓按评分选前 `n_positions` 只股票；默认每 5 个信号日调一次。选不满时留现金，例如目标 20 只、只选到 10 只，等权组合的目标仓位就是约 50%。
+
+| 项目 | 默认值或处理方式 |
+|---|---|
+| 买入股数 | 向下取整到 100 股一手 |
+| T+1 | 当天买入的持仓当天不能卖 |
+| 涨停开盘 | 不买入、不加仓；已有持仓可以保留 |
+| 跌停开盘、停牌 | 卖单跳过，持仓继续保留 |
+| 买单金额上限 | 前 20 个交易日成交额中位数的 5%，至少需要 5 条历史记录 |
+| 佣金 | 万 2.5，每笔最低 ¥5 |
+| 过户费 | 双边十万分之一 |
+| 滑点与冲击成本 | 成交额 ×（5bp + 0.10 × 参与率） |
+| 印花税 | 卖出 0.05%；历史回测可按日期取税率 |
+
+费用通过 `CostModel` 设置，买入金额上限通过 `max_participation` 设置。滑点和冲击成本从现金中扣除。成交额历史不足或无效时，买单会退回目标仓位和现金约束，不应用成交额上限；卖单也不受这个上限约束。
+
+还有几个按需使用的参数：
+
+- `rebalance_weights=False`：调仓时不修正已有持仓的权重漂移。
+- `rebalance_dates`：指定调仓的信号日，替代固定间隔。
+- `exposure`：传给 `run_backtest` 的 Series，按信号日设置股票仓位比例。降低已有仓位需要保留 `rebalance_weights=True`。
+- `exit_flags`：传入 `[date, code]`，在下一交易日开盘尝试退出。每个信号日都会检查；卖不掉时，需要在后续日期继续给出标记。
+- `refill=True`：退出后在同一执行日开盘补入其他股票；默认让现金等到下次调仓。
+- `cash_annual_rate`：闲置现金的年利率，默认 0。
+- `settlement_t0`、`lot_size`、`costs`：可调整交收、每手数量和费用，例如用不同约定跑可转债。
+
+一只股票的数据提前结束后，引擎会在后续执行日按最后持仓价值转回现金，记录为 `delist`，不收费用。这是处理数据结束的简化方式，缺失数据也会触发它；不能把这笔金额当作真实退市回收款。
+
+## 历史印花税
+
+跨年份回测可以用 `CostModel(historical_stamp_duty=True)`。内置表从 2001-11-16 开始，早于这个日期会报错。
+
+| 生效日 | 买方 | 卖方 |
 |---|---|---|
-| 成交时点 | 信号日下一交易日开盘 | — |
-| 交收 | T+1 | `settlement_t0=True`（可转债） |
-| 每手 | 100 股 | `lot_size=10`（可转债） |
-| 涨停开盘 | 不能买入或加仓，已持有的继续持有 | — |
-| 跌停开盘、停牌 | 不能卖出，继续持有到下次可以卖出 | — |
-| 单票上限 | 20 日成交额中位数的 5% | `max_participation` |
-| 佣金 | 万 2.5，最低 ¥5 | `CostModel(commission_rate, commission_min)` |
-| 过户费 | 十万分之一，双边 | `transfer_fee` |
-| 滑点和冲击 | 5bp + 0.10 × 参与率 | `slippage_bps`, `impact_coef` |
-| 印花税 | 固定 0.05%，仅卖出 | `CostModel(historical_stamp_duty=True)` 按成交日取当时税率 |
+| 2001-11-16 | 0.2% | 0.2% |
+| 2005-01-24 | 0.1% | 0.1% |
+| 2007-05-30 | 0.3% | 0.3% |
+| 2008-04-24 | 0.1% | 0.1% |
+| 2008-09-19 | 0 | 0.1% |
+| 2023-08-28 | 0 | 0.05% |
 
-`historical_stamp_duty=True` 使用的税率表：
+来源：[历次调整汇总（财联社）](https://www.cls.cn/detail/1433377)、[2008 年改为单边征收（中新网）](https://www.chinanews.com/cj/agyw/news/2008/09-18/1386777.shtml)、[2023 年减半征收（新华网）](https://www.news.cn/2023-08/28/c_1212260850.htm)。这个开关只调整印花税，其他费用仍使用 `CostModel` 的配置。
 
-| 生效日 | 买方 | 卖方 | 出处 |
-|---|---|---|---|
-| 2001-11-16 | 0.2% | 0.2% | 财政部、国家税务总局下调 A、B 股交易印花税 |
-| 2005-01-24 | 0.1% | 0.1% | 财政部 2005-01-23 公布下调 |
-| 2007-05-30 | 0.3% | 0.3% | 财政部上调证券交易印花税 |
-| 2008-04-24 | 0.1% | 0.1% | 财政部下调证券交易印花税 |
-| 2008-09-19 | 0 | 0.1% | 财政部、国家税务总局改为单边征收（[中新网](https://www.chinanews.com/cj/agyw/news/2008/09-18/1386777.shtml)） |
-| 2023-08-28 | 0 | 0.05% | 财政部 税务总局公告 2023 年第 39 号（[新华网](https://www.news.cn/2023-08/28/c_1212260850.htm)） |
+## 指标与示例
 
-历次调整的整理可参考[财联社](https://www.cls.cn/detail/1433377)。早于 2001-11-16 的日期会直接报错，不会静默套用某个税率。
+CAGR 主要按日历天数 / 365.25 计算，极短区间有最小年数保护。波动率和 Sharpe 按 252 个交易日年化，Sharpe 的无风险利率为 0。现金利息按年利率 / 243.6 在每个执行日计提。
 
-### 指标口径
+| 示例 | 内容 |
+|---|---|
+| [01_quickstart.py](examples/01_quickstart.py) | 合成数据上的 20 日动量组合 |
+| [02_capacity_sweep.py](examples/02_capacity_sweep.py) | 同一信号在 10 万到 1 亿资金下的结果 |
+| [03_fetch_with_baostock.py](examples/03_fetch_with_baostock.py) | 拉取几只股票的日线，需要 `pip install -e '.[baostock]'` 和网络；单线程运行 |
+| [04_naive_vs_real.py](examples/04_naive_vs_real.py) | 用涨停或反转信号比较收盘成交、加费用、下一开盘成交三种回测 |
 
-- `cagr` 按日历时间计算：年数 = 天数 / 365.25。A 股一年约 243 个交易日，用 交易日数 / 252 会高估 CAGR。
-- `sharpe` 是日收益的算术均值 × 252 ÷ 年化波动，无风险利率取 0。CAGR / 波动是另一个量，不叫 Sharpe。
-- 波动和 Sharpe 按 √252 年化，这是行业通用口径，方便和外部数字比较。A 股实际一年约 243.6 个交易日，按这个数年化会让 Sharpe 低约 1.7%。CAGR 和闲置资金利息用的是日历时间和 243.6 天，因为它们是时间量，不是统计量。
+合成行情是随机游走，用来检查规则和跑示例，不能用它判断策略有没有收益。第 4 个示例默认用涨停信号，加 `--signal reversal` 可切换为反转信号，也能读自己的 parquet 文件；需要另装 parquet 引擎（如 `pyarrow`），保存图表还需要 `matplotlib`。
 
-### 示例
+## 开发
 
-- `examples/01_quickstart.py`：合成数据上的 20 日动量组合。合成数据是随机游走，本身没有 alpha，跑出来的就是成本拖累，这正是要看的。
-- `examples/02_capacity_sweep.py`：同一信号在 10 万到 1 亿资金下的衰减。
-- `examples/03_fetch_with_baostock.py`：用 baostock 拉几只真实股票的日线再跑一遍。需要联网。baostock 禁止并发连接，请保持单线程。
+```bash
+pip install -e '.[dev]'
+ruff check .
+pytest -q -W error::FutureWarning
+```
 
-### 不做的事
+测试用小规模合成数据覆盖成交时点、涨跌停、成本、仓位、除权和输入检查。项目目前只做日线多头回测，没有盘口、分钟数据或做空模型。
 
-做空、期货、分钟级回测、事件驱动框架。
+## 许可证
 
-### License
+[MIT](LICENSE)。
 
-MIT
+如果这个项目对你有用，欢迎点个 Star。数据接入或回测结果有问题，可以在 [Issues](https://github.com/Issac250/ashare-bt/issues) 里附上最小复现。

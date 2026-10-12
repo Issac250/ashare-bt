@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ashare-bt"
 version = "0.1.0"
-description = "A cross-sectional backtester for China A-shares that only fills orders the exchange would have filled."
+description = "A 股日线回测：下一开盘成交、交易成本与资金容量分析。"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
