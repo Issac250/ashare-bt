@@ -6,10 +6,11 @@
 
 **Why.** Most A-share backtests are optimistic in the same few ways: they trade at the close they used to decide, buy stocks that opened locked at limit-up, sell the same day they bought (T+1), ignore the ¥5 minimum commission and 100-share lots, book splits as losses, and let delisted stocks freeze capital. Each of these is a rule here, with a test that fails if it is broken.
 
-**Results.** 90 tests on synthetic panels, one per venue rule: next-open execution, open-based limit gates, T+1, whole lots, participation cap and market impact, historical stamp duty back to 2001, total-return position accounting through splits and dividends, forced liquidation on delisting, and a capital-capacity sweep.
+**Results.** 94 tests on synthetic panels, one per venue rule: next-open execution, open-based limit gates, T+1, whole lots, participation cap and market impact, historical stamp duty back to 2001, total-return position accounting through splits and dividends, forced liquidation on delisting, and a capital-capacity sweep.
 
 ```bash
-pip install git+https://github.com/Issac250/ashare-bt
+git clone https://github.com/Issac250/ashare-bt && cd ashare-bt
+pip install -e .
 python examples/01_quickstart.py
 ```
 
@@ -34,8 +35,8 @@ A 股回测最常见的高估，几乎都来自"这笔单子其实成交不了"�
 ### 输入
 
 - `signal`：`[date, code, score]`，分数越高越想买；可选 `w` 列设定相对权重。
-- `bars`：`[date, code, open, close, preclose, ret, amount, tradable, open_limit_up, open_limit_down]`
-  - `open_limit_up` / `open_limit_down` 必须描述**开盘**时是否在涨跌停。传入旧字段名 `at_limit_up` 会直接报错，提醒你检查口径。
+- `bars`：`[date, code, open, close, preclose, amount, tradable, open_limit_up, open_limit_down]`（`ret` 可选，引擎不读，`make_signal` 会用）
+  - `open_limit_up` / `open_limit_down` 必须描述**开盘**时是否在涨跌停。传入旧字段名 `at_limit_up` 会直接报错，提醒你检查口径。涨跌停价按交易所规则四舍五入到分，可用 `ashare_bt.sizing.limit_prices(preclose, width)` 计算；直接用浮点 `round` 会把 27.95 × 1.1 = 30.745 算成 30.74。
   - `preclose` 必须是除权后的昨收（baostock 的 `preclose` 已经除权），`open / preclose` 就是隔夜的总收益。
   - 涨跌停字段为空时按"在涨跌停"处理：不能买，也不能卖。
 

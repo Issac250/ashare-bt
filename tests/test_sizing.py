@@ -189,3 +189,10 @@ def test_settlement_t0_lets_a_position_be_sold_the_day_it_was_bought():
     # Convertible bonds on the same exchanges settle same-day.
     d = pd.Timestamp("2024-01-05")
     assert sizing.settled(d, d, settlement_t0=True)
+
+
+def test_limit_prices_round_half_up_like_the_exchange():
+    """27.95 * 1.1 = 30.745 -> 30.75; float rounding gives 30.74 and flags a normal open."""
+    up, dn = sizing.limit_prices(pd.Series([27.95, 10.0]), 0.10)
+    assert list(up) == [30.75, 11.0]
+    assert list(dn) == [25.16, 9.0]   # 27.95 * 0.9 = 25.155 -> 25.16

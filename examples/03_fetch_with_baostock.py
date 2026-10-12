@@ -1,6 +1,6 @@
 """Run the engine on real daily bars fetched with baostock.
 
-Needs `pip install "ashare-bt[baostock]"` and network access. baostock forbids
+Needs `pip install baostock` and network access. baostock forbids
 concurrent connections: keep this single-threaded and do not loop it over the
 whole market without a rate limit.
 
@@ -11,6 +11,7 @@ import baostock as bs
 import pandas as pd
 
 from ashare_bt import BacktestConfig, run_backtest
+from ashare_bt.sizing import limit_prices
 from ashare_bt.synthetic import make_signal
 
 CODES = ["sh.600000", "sh.600036", "sh.601318", "sz.000001", "sz.000002"]
@@ -35,11 +36,12 @@ finally:
 
 for col in ("open", "close", "preclose", "amount", "pctChg"):
     raw[col] = pd.to_numeric(raw[col], errors="coerce")
+up, dn = limit_prices(raw["preclose"], LIMIT_WIDTH)
 bars = raw.assign(
     ret=raw["pctChg"] / 100,
     tradable=(raw["tradestatus"] == "1") & (raw["amount"] > 0),
-    open_limit_up=raw["open"] >= (raw["preclose"] * (1 + LIMIT_WIDTH)).round(2),
-    open_limit_down=raw["open"] <= (raw["preclose"] * (1 - LIMIT_WIDTH)).round(2),
+    open_limit_up=raw["open"] >= up,
+    open_limit_down=raw["open"] <= dn,
 ).drop(columns=["tradestatus", "pctChg"])
 
 signal = make_signal(bars, kind="momentum", lookback=20)

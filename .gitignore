@@ -8,3 +8,4 @@ build/
 *.parquet
 *.duckdb
 *.csv
+.superpowers/

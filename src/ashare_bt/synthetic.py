@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .sizing import limit_prices
+
 BARS_COLUMNS = ["date", "code", "open", "close", "preclose", "ret", "amount",
                 "tradable", "open_limit_up", "open_limit_down"]
 
@@ -37,7 +39,7 @@ def make_market(n_stocks: int = 50, n_days: int = 500, start: str = "2020-01-02"
         amt = np.empty(n)
         trad = np.ones(n, dtype=bool)
         for t in range(n):
-            up, dn = round(price * (1 + limit_width), 2), round(price * (1 - limit_width), 2)
+            up, dn = (float(x) for x in limit_prices(price, limit_width))
             pc[t] = price
             if rng.random() < halt_prob:
                 o[t] = c[t] = price
@@ -59,8 +61,9 @@ def make_market(n_stocks: int = 50, n_days: int = 500, start: str = "2020-01-02"
             "preclose": pc, "ret": c / pc - 1.0, "amount": amt, "tradable": trad,
         }))
     bars = pd.concat(frames, ignore_index=True)
-    bars["open_limit_up"] = bars["open"] >= (bars["preclose"] * (1 + limit_width)).round(2)
-    bars["open_limit_down"] = bars["open"] <= (bars["preclose"] * (1 - limit_width)).round(2)
+    up, dn = limit_prices(bars["preclose"], limit_width)
+    bars["open_limit_up"] = bars["open"] >= up
+    bars["open_limit_down"] = bars["open"] <= dn
     return bars.sort_values(["date", "code"]).reset_index(drop=True)[BARS_COLUMNS]
 
 

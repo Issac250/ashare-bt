@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from ashare_bt import BacktestConfig, run_backtest
+from ashare_bt.sizing import limit_prices
 from ashare_bt.synthetic import BARS_COLUMNS, make_market, make_signal
 
 
@@ -19,15 +20,15 @@ def test_columns_and_determinism(bars):
 
 
 def test_prices_stay_inside_the_daily_band(bars):
-    up = (bars["preclose"] * 1.10).round(2)
-    dn = (bars["preclose"] * 0.90).round(2)
+    up, dn = limit_prices(bars["preclose"], 0.10)
     assert (bars["close"] <= up).all() and (bars["close"] >= dn).all()
     assert (bars["open"] <= up).all() and (bars["open"] >= dn).all()
 
 
 def test_limit_flags_describe_the_open(bars):
-    up = (bars["preclose"] * 1.10).round(2)
+    up, dn = limit_prices(bars["preclose"], 0.10)
     assert (bars["open_limit_up"] == (bars["open"] >= up)).all()
+    assert (bars["open_limit_down"] == (bars["open"] <= dn)).all()
 
 
 def test_every_venue_rule_has_something_to_act_on(bars):
@@ -61,3 +62,12 @@ def test_runs_through_the_engine(bars):
 def test_unknown_signal_kind_is_refused(bars):
     with pytest.raises(ValueError, match="kind"):
         make_signal(bars, kind="oracle")
+
+
+def test_limit_flags_match_half_up_limit_prices():
+    """Seed 3 contains opens one fen below a half-up limit (e.g. preclose 27.95)."""
+    from decimal import ROUND_HALF_UP, Decimal
+    bars = make_market(seed=3)
+    up = bars["preclose"].map(lambda p: float((Decimal(str(p)) * Decimal("1.1")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP)))
+    assert (bars["open_limit_up"] == (bars["open"] >= up)).all()

@@ -316,8 +316,8 @@ def _weights(res, bars, day_idx):
     """Value weights of the book after the rebalance on DATES[day_idx].
 
     Each trade's share count must be recovered at ITS OWN price, not at the
-    measurement day's -- a first version of this divided every notional by the
-    final price and reported an equal-weighted book as 0.62/0.38.
+    measurement day's; dividing every notional by the final price would
+    misreport an equal-weighted book.
     """
     at = {(r["date"], r["code"]): r["open"] for _, r in bars.iterrows()}
     end_px = {r["code"]: r["open"] for _, r in

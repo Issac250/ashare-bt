@@ -19,7 +19,7 @@ be a share of daily turnover trades off impact against breadth.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 
@@ -54,16 +54,10 @@ def sweep(signal: pd.DataFrame, bars: pd.DataFrame,
     rows: list[CapacityPoint] = []
     for part in participations:
         for cap in capitals:
-            cfg = BacktestConfig(
-                capital=cap, n_positions=base.n_positions,
-                rebalance_days=base.rebalance_days, max_participation=part,
-                long_only=True, costs=base.costs,
-            )
-            try:
-                res = run_backtest(signal, bars, cfg)
-            except Exception as exc:
-                log.warning("capital=%s part=%s failed: %s", cap, part, exc)
-                continue
+            # Only the two swept axes change; every other setting (venue rules,
+            # weighting, refill, cash rate) is the caller's.
+            cfg = replace(base, capital=cap, max_participation=part)
+            res = run_backtest(signal, bars, cfg)
             m = res.metrics
             # Cash left idle because the participation cap blocked deployment
             # is itself a capacity signal, so report it rather than hide it.

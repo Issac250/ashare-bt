@@ -10,9 +10,22 @@ venue's rules, it answers how many shares.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from .costs import CostModel
+
+
+def limit_prices(preclose, width: float):
+    """(up, down) daily limit prices, rounded half-up to the fen as the exchange does.
+
+    Float rounding gets the half-fen cases wrong: 27.95 * 1.1 = 30.745 rounds
+    to 30.74, which flags an ordinary open at 30.74 as limit-up. Works on
+    scalars, arrays and Series (index kept).
+    """
+    def half_up(x):
+        return np.floor(x * 100 + 0.5 + 1e-6) / 100
+    return half_up(preclose * (1 + width)), half_up(preclose * (1 - width))
 
 
 def whole_lots(budget: float, px: float, lot_size: int) -> int:

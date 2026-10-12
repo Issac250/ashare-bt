@@ -158,9 +158,10 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                  exit_flags: pd.DataFrame | None = None) -> BacktestResult:
     """Run a cross-sectional long book.
 
-    `signal` needs [date, code, score]; `bars` needs [date, code, open, close,
-    ret, amount, tradable, open_limit_up, open_limit_down]. Both are plain frames
-    so this is testable without any database.
+    `signal` needs [date, code, score] (optional `w`); `bars` needs
+    [date, code, open, close, preclose, amount, tradable, open_limit_up,
+    open_limit_down] (`REQUIRED_BARS`). The limit flags must describe the OPEN.
+    Both are plain frames so this is testable without any database.
 
     `exposure` is an optional Series indexed by signal date giving the fraction
     of equity to hold in stocks, in [0, 1]; the remainder sits in cash. It is
