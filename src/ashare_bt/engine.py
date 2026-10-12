@@ -83,13 +83,13 @@ class BacktestConfig:
 
 
 def _size_order(px: float, adv, want_value: float, cash: float,
-                cfg: "BacktestConfig") -> tuple[int, float, float]:
+                cfg: "BacktestConfig", costs: CostModel) -> tuple[int, float, float]:
     """Largest whole-lot order that fits the cap, the want and the cash.
 
     Delegates to `sizing.fit_buy` so order-placing code can round identically.
     """
     return sizing.fit_buy(px, want_value, adv, cfg.max_participation,
-                          cash, cfg.lot_size, cfg.costs)
+                          cash, cfg.lot_size, costs)
 
 
 @dataclass
@@ -276,6 +276,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
         ex = bars_by_date.get(ex_day)
         if ex is None:
             continue
+        day_costs = cfg.costs.on(ex_day)
 
         # Advance the existing book from last night's close to this morning's
         # open, through any corporate action that happened in between.
@@ -312,7 +313,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                 continue
             adv = row["adv20"]
             part = notional / adv if (pd.notna(adv) and adv > 0) else 0.0
-            c = cfg.costs.trade_cost(notional, True, part)
+            c = day_costs.trade_cost(notional, True, part)
             cash += notional - c
             cost_today += c
             traded_notional += notional
@@ -356,7 +357,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                             if pd.notna(v) and v > 0:
                                 mult = float(v)
                         shares, notional, c = _size_order(
-                            float(row["open"]), row["adv20"], per_name * mult, cash, cfg)
+                            float(row["open"]), row["adv20"], per_name * mult, cash, cfg, day_costs)
                         if shares <= 0:
                             continue
                         cash -= notional + c
@@ -425,7 +426,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     continue
                 adv = row["adv20"]
                 part = notional / adv if (pd.notna(adv) and adv > 0) else 0.0
-                c = cfg.costs.trade_cost(notional, True, part)
+                c = day_costs.trade_cost(notional, True, part)
                 cash += notional - c
                 cost_today += c
                 traded_notional += notional
@@ -479,7 +480,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     notional = min(px * shares, holdings[code]["value"])
                     adv = row["adv20"]
                     part = notional / adv if (pd.notna(adv) and adv > 0) else 0.0
-                    c = cfg.costs.trade_cost(notional, True, part)
+                    c = day_costs.trade_cost(notional, True, part)
                     cash += notional - c
                     cost_today += c
                     traded_notional += notional
@@ -517,7 +518,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                         want_value = tgt(code) - holdings[code]["value"]
                         if want_value <= 0:
                             continue
-                    shares, notional, c = _size_order(px, adv, want_value, cash, cfg)
+                    shares, notional, c = _size_order(px, adv, want_value, cash, cfg, day_costs)
                     if shares <= 0:
                         continue
                     cash -= notional + c
