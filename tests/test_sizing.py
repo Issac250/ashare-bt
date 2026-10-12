@@ -1,8 +1,4 @@
-"""Order sizing. Pins the quirks, because order-placing code depends on them too.
-
-Every test here is a statement about behaviour that must not change if the
-sizing rules are refactored.
-"""
+"""Lot rounding, turnover caps, cash limits, and trading checks."""
 from __future__ import annotations
 
 import pandas as pd
@@ -13,9 +9,6 @@ from ashare_bt.costs import CostModel
 COSTS = CostModel(slippage_bps=10.0)
 
 
-# ---------------------------------------------------------------------------
-# whole_lots
-# ---------------------------------------------------------------------------
 
 def test_whole_lots_rounds_down_never_up():
     # CNY 1,050 at CNY 10 is 105 shares, which is one lot plus a fraction.
@@ -25,7 +18,7 @@ def test_whole_lots_rounds_down_never_up():
 
 
 def test_whole_lots_handles_the_lot_floor_that_binds_at_small_capital():
-    """A CNY 24.79 stock (the 90th percentile) needs CNY 2,479 for one lot."""
+    """One lot at CNY 24.79 requires CNY 2,479 before fees."""
     assert sizing.whole_lots(2_000, 24.79, 100) == 0
     assert sizing.whole_lots(2_479, 24.79, 100) == 100
 
@@ -43,30 +36,18 @@ def test_whole_lots_respects_a_non_default_lot_size():
     assert sizing.whole_lots(105, 10.0, 10) == 10
 
 
-# ---------------------------------------------------------------------------
-# participation_cap
-# ---------------------------------------------------------------------------
 
 def test_participation_cap_is_a_share_of_the_stocks_own_turnover():
     assert sizing.participation_cap(1_000_000, 0.02) == 20_000
 
 
 def test_unknown_turnover_caps_at_zero_which_callers_read_as_no_cap():
-    """The quirk, pinned deliberately.
-
-    Zero means "no basis to size against", and `fit_buy` then falls back to the
-    target weight rather than placing no order. That is what the engine did
-    inline, so it is preserved -- it affects only names with no 20-day turnover
-    history, i.e. recent listings.
-    """
+    """Missing or nonpositive turnover returns zero; fit_buy treats this as uncapped."""
     assert sizing.participation_cap(float("nan"), 0.02) == 0.0
     assert sizing.participation_cap(0.0, 0.02) == 0.0
     assert sizing.participation_cap(-5.0, 0.02) == 0.0
 
 
-# ---------------------------------------------------------------------------
-# fit_buy
-# ---------------------------------------------------------------------------
 
 def test_fit_buy_sizes_to_the_target_weight_when_nothing_else_binds():
     shares, notional, cost = sizing.fit_buy(
@@ -87,12 +68,7 @@ def test_fit_buy_is_capped_by_participation_not_by_the_target():
 
 
 def test_fit_buy_steps_down_until_the_order_plus_costs_fits_the_cash():
-    """The reason a step-down loop exists at all.
-
-    With cash exactly equal to the notional, the order does not fit once costs
-    are added. Sizing to the budget and then rejecting would skip the buy
-    entirely -- and at a rebalance deploying the whole book, that is most buys.
-    """
+    """Leave room for fees by reducing the share count instead of skipping the buy."""
     shares, notional, cost = sizing.fit_buy(
         px=10.0, want_value=10_000, adv20=1e9, max_participation=0.02,
         cash=10_000, lot_size=100, costs=COSTS)
@@ -124,25 +100,19 @@ def test_fit_buy_refuses_when_there_is_no_cash():
 
 
 def test_fit_buy_impact_cost_grows_with_participation():
-    """Impact is why capacity bites. Same order, thinner stock, higher cost."""
+    """The same order costs more against lower reference turnover."""
     _, n1, c1 = sizing.fit_buy(10.0, 2_000, 1e9, 1.0, 1e6, 100, COSTS)
     _, n2, c2 = sizing.fit_buy(10.0, 2_000, 4_000, 1.0, 1e6, 100, COSTS)
     assert n1 == n2 == 2_000
     assert c2 > c1
 
 
-# ---------------------------------------------------------------------------
-# fit_sell
-# ---------------------------------------------------------------------------
 
 def test_fit_sell_trims_in_whole_lots():
     assert sizing.fit_sell(10.0, 2_050, 100) == 200
     assert sizing.fit_sell(10.0, 999, 100) == 0
 
 
-# ---------------------------------------------------------------------------
-# Gates
-# ---------------------------------------------------------------------------
 
 def _row(open_=10.0, tradable=True, lu=False, ld=False) -> pd.Series:
     return pd.Series({"open": open_, "tradable": tradable,
@@ -157,13 +127,7 @@ def test_can_buy_requires_a_price_a_tradable_bar_and_an_open_off_limit_up():
 
 
 def test_can_buy_is_judged_at_the_open_not_the_close():
-    """Pinned so a close-based gate cannot return.
-
-    Most stocks that CLOSE at limit-up did not OPEN there, and a close-based
-    gate refuses exactly the names that then rose 10%. A bar that opens
-    normally is buyable regardless of where it ends the day -- and nothing in
-    this function can see where it ends the day, which is the point.
-    """
+    """Buying eligibility depends only on the open flags, not the later close."""
     assert sizing.can_buy(_row(open_=10.0, lu=False))
     assert list(_row().index) == ["open", "tradable", "open_limit_up", "open_limit_down"]
 
@@ -175,11 +139,7 @@ def test_can_sell_blocks_a_limit_down_and_a_halt():
 
 
 def test_settled_enforces_t_plus_one_by_date_not_by_elapsed_days():
-    """A weekend must not count as settlement time.
-
-    Bought Friday, "two days later" is Sunday -- not a session. Comparing
-    dates rather than counting days is what makes that automatic.
-    """
+    """A Friday purchase is sellable on Monday, but not on Friday."""
     fri, mon = pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-08")
     assert not sizing.settled(fri, fri)
     assert sizing.settled(fri, mon)

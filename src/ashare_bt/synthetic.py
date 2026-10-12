@@ -1,8 +1,7 @@
-"""Synthetic A-share-like bars and signals, for examples and tests.
+"""Random-walk bars for examples and tests.
 
-Nothing here is market data. The generator only has to produce panels on which
-every venue rule in the engine fires: opens at the limit, halts, stocks whose
-data ends (delisting), and prices that respect the daily band.
+Includes limit opens, halts, and stocks whose histories end early.
+Dates are weekdays, not an exchange calendar.
 """
 from __future__ import annotations
 
@@ -69,10 +68,9 @@ def make_market(n_stocks: int = 50, n_days: int = 500, start: str = "2020-01-02"
 
 def make_signal(bars: pd.DataFrame, kind: str = "momentum", lookback: int = 20,
                 seed: int = 0) -> pd.DataFrame:
-    """A [date, code, score] frame built only from data up to each date.
+    """Build date, code, score using data available through each date.
 
-    `momentum`: trailing `lookback`-day total return. `random`: uniform noise,
-    the null a real signal has to beat.
+    momentum uses the trailing lookback-day return; random uses uniform noise.
     """
     b = bars.sort_values(["code", "date"])
     if kind == "momentum":

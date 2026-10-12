@@ -1,4 +1,4 @@
-"""What the engine does with inputs a user is likely to get slightly wrong."""
+"""Input validation, missing flags, and date conversion."""
 from __future__ import annotations
 
 import pandas as pd

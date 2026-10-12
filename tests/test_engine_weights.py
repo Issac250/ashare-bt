@@ -1,12 +1,4 @@
-"""Target-weight tests for the backtest engine.
-
-An optional `w` column sets relative position sizes, e.g. for risk-based
-weighting such as a yield/volatility-weighted dividend index.
-
-These tests pin the two properties that matter: an omitted or constant weight
-must reproduce the equal-weight book EXACTLY,
-and a supplied weight must be honoured in the ratio of position VALUES.
-"""
+"""Relative position weights, equal-weight defaults, and cash for unfilled slots."""
 from __future__ import annotations
 
 import pandas as pd
@@ -44,7 +36,7 @@ def test_constant_weights_reproduce_equal_weight_exactly():
 
 
 def test_weights_are_honoured_in_position_values():
-    """3:1 weights must give 3:1 position VALUES, not 3:1 share counts."""
+    """3:1 weights apply to position values, regardless of stock price."""
     bars = make_bars({"a": flat_series("a", 10.0), "b": flat_series("b", 25.0)})
     res = run_backtest(_signal({"a": 2.0, "b": 1.0}, {"a": 0.75, "b": 0.25}), bars, _cfg())
     buys = res.trades[res.trades["side"] == "buy"]
@@ -53,9 +45,7 @@ def test_weights_are_honoured_in_position_values():
 
 
 def test_weights_do_not_lever_when_a_name_is_missing():
-    """With n_positions=3 but only 2 names available, the book must stay ~2/3
-    invested -- the same 'size against the breadth cap' rule equal weight uses.
-    Renormalising onto the survivors would silently lever an event book."""
+    """Two qualifying stocks out of three target slots leave about one-third in cash."""
     bars = make_bars({"a": flat_series("a", 10.0), "b": flat_series("b", 25.0)})
     res = run_backtest(_signal({"a": 2.0, "b": 1.0}, {"a": 0.5, "b": 0.5}), bars, _cfg(n=3))
     invested = res.daily["n_positions"].iloc[-1]

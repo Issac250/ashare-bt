@@ -1,15 +1,4 @@
-"""Three things the engine could not express, all on the SELL side's aftermath.
-
-When an exit rule sells a position, the default is that the cash waits until
-the next calendar rebalance, up to `rebalance_days` away. On a book whose score
-gradient is steep that is a real decision, so it is configurable.
-
-  refill            redeploy the freed slot the next morning instead of waiting
-  cash_annual_rate  pay interest on idle cash instead of assuming 0%
-  rebalance_dates   rebalance when the INFORMATION arrives rather than every N
-                    days, so a fixed calendar does not re-pick a ranking
-                    that has not moved
-"""
+"""Cash interest, replacements after exits, and explicit rebalance dates."""
 from __future__ import annotations
 
 import pandas as pd
@@ -35,7 +24,7 @@ def _cfg(**kw):
 
 
 def test_cash_earns_nothing_by_default():
-    """An all-cash book must stay exactly flat unless a rate is asked for."""
+    """The default and an explicit zero cash rate give the same equity curve."""
     bars = make_bars({"a": flat_series("a", 10.0)})
     res = run_backtest(_sig({"a": 1.0}), bars, _cfg(n_positions=2, capital=1_000_000.0))
     # half the book is cash (1 name, n_positions=2); with no rate it must not grow
@@ -46,7 +35,7 @@ def test_cash_earns_nothing_by_default():
 
 
 def test_cash_rate_compounds_on_the_idle_half():
-    """2% a year on a book that is half cash must show up, and only on the cash."""
+    """Interest accrues on the cash half of the portfolio."""
     bars = make_bars({"a": flat_series("a", 10.0)})
     flat = run_backtest(_sig({"a": 1.0}), bars, _cfg()).equity
     paid = run_backtest(_sig({"a": 1.0}), bars, _cfg(cash_annual_rate=0.02)).equity
@@ -57,8 +46,9 @@ def test_cash_rate_compounds_on_the_idle_half():
 
 
 def test_refill_redeploys_an_exited_slot_before_the_next_rebalance():
-    """Exit 'a' on day 2. With refill the freed slot buys 'c' the next morning;
-    without it the money waits for the rebalance 20 days out."""
+    """With refill, selling a also buys c at the exit open.
+    Without refill, that slot stays empty until the next rebalance.
+    """
     bars = make_bars({"a": flat_series("a", 10.0), "b": flat_series("b", 10.0),
                       "c": flat_series("c", 10.0)})
     sig = _sig({"a": 3.0, "b": 2.0, "c": 1.0})
@@ -82,7 +72,7 @@ def test_refill_never_rebuys_the_name_it_just_exited():
 
 
 def test_explicit_rebalance_dates_replace_the_calendar():
-    """With rebalance_dates given, no trade may happen on any other signal day."""
+    """Without exit flags, trades follow only the specified rebalance dates."""
     bars = make_bars({"a": flat_series("a", 10.0), "b": flat_series("b", 10.0)})
     picked = {pd.Timestamp(DATES[0]), pd.Timestamp(DATES[17])}
     res = run_backtest(_sig({"a": 3.0, "b": 2.0}), bars,

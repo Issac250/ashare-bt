@@ -1,28 +1,12 @@
-"""Strategy-agnostic cross-sectional backtest engine.
+"""Daily portfolio backtest with next-open execution.
 
-The engine knows NOTHING about any particular strategy. It takes a signal
-panel and returns performance. Strategies are therefore just functions that
-produce signals, and can be swapped or tuned without touching this file.
+Signals supply stock rankings; this module handles selection, sizing, costs,
+and valuation. Holdings are tracked in yuan and updated using open/preclose
+and close/open ratios. Raw prices are used for lot rounding.
 
-    signal:  DataFrame[date, code, score]   higher score = more attractive
-    output:  BacktestResult (equity curve, per-date detail, metrics)
-
-Execution model. The DEFAULTS match how A-share equity actually trades; the two
-venue-specific rules are config, because convertible bonds trade on the same
-exchanges under different ones (T+0 settlement, 10-bond lots, no stamp duty).
-  * Signal computed from data up to and including date t.
-  * Trades execute at t+1's OPEN. Nothing uses t+1 close to decide t+1 trades.
-  * T+1 settlement: a position bought on day t cannot be sold before t+1.
-    Set `settlement_t0=True` for instruments that settle same-day.
-  * Lot size defaults to 100 (A-share). Set `lot_size=10` for convertible bonds.
-    Stamp duty is already a CostModel field: pass CostModel(stamp_duty=0.0).
-  * Cannot buy a stock that opens at its limit-up, nor sell one at limit-down.
-  * Position size is capped by a share of the stock's recent ¥ turnover, so
-    the same signal can be re-run at several capital levels to expose the
-    capacity/alpha trade-off rather than assuming it away.
-  * Positions are carried as ¥ VALUE and advanced by the total return, so a
-    split or a dividend is not a loss. Share counts are derived at the raw
-    price only where the real share count matters: lot rounding.
+Defaults use 100-share lots and T+1. Opening limit flags block buys at
+limit-up and sells at limit-down. These are daily-data approximations of
+execution, not an auction or order-book simulation.
 """
 from __future__ import annotations
 
@@ -37,9 +21,7 @@ from .costs import LOT_SIZE, CostModel
 
 log = logging.getLogger("backtest")
 
-# `preclose` is required rather than defaulted: it is what makes a split or a
-# dividend not look like a loss, and defaulting the overnight ratio to 1.0
-# would silently drop every overnight move.
+# preclose supplies the reference for overnight returns, including ex-rights days.
 REQUIRED_BARS = ("date", "code", "open", "close", "preclose", "amount",
                  "tradable", "open_limit_up", "open_limit_down")
 
@@ -50,27 +32,19 @@ class BacktestConfig:
     n_positions: int = 50            # breadth; smaller = more concentrated
     rebalance_days: int = 5          # 5 = weekly
     max_participation: float = 0.05  # cap position at 5% of 20d median ¥ turnover
-    long_only: bool = True           # A-share retail cannot practically short
-    # Select from a percentile band of the score instead of the extreme top.
-    # Several A-share factors invert in the extreme tail, so the very top names
-    # can be falling knives. (0.80, 0.95) means "well-ranked but not extreme".
+    long_only: bool = True           # only long_only=True is supported
+    # Optional score percentile range, e.g. (0.80, 0.95).
     score_band: tuple[float, float] | None = None
-    # Trim held names back toward their target weight on each rebalance.
-    # False lets winners drift and concentrate the book.
+    # Trim and top up existing holdings on rebalance days.
     rebalance_weights: bool = True
-    # Venue rules. Defaults are A-share equity; convertible bonds on the same
-    # exchanges settle T+0 and trade in lots of 10 (¥1,000 face).
-    settlement_t0: bool = False      # True = a position bought today CAN be sold today
+    # Override settlement and lot size for other instruments.
+    settlement_t0: bool = False      # allow same-day sales
     lot_size: int | None = None      # None = the A-share default of 100
     costs: CostModel = None          # type: ignore[assignment]
-    # What happens to cash freed by an exit: `refill` redeploys the slot at the
-    # next open; otherwise it waits for the next rebalance, earning
-    # `cash_annual_rate` (243.6 trading days a year).
-    refill: bool = False             # redeploy a freed slot at the next open
+    # By default, exit proceeds wait for the next rebalance.
+    refill: bool = False             # buy replacements at the exit open
     cash_annual_rate: float = 0.0    # interest on idle cash
-    # Rebalance when the INFORMATION arrives instead of every N days: a fixed
-    # N-day calendar re-picks a ranking that has not moved. Signal dates NOT in this
-    # set are still checked for exits; they just do not re-pick the book.
+    # Explicit signal dates replace the fixed rebalance interval. Exits still run daily.
     rebalance_dates: frozenset | None = None
 
     def __post_init__(self) -> None:
@@ -84,10 +58,7 @@ class BacktestConfig:
 
 def _size_order(px: float, adv, want_value: float, cash: float,
                 cfg: "BacktestConfig", costs: CostModel) -> tuple[int, float, float]:
-    """Largest whole-lot order that fits the cap, the want and the cash.
-
-    Delegates to `sizing.fit_buy` so order-placing code can round identically.
-    """
+    """Size a buy using the shared lot, turnover, and cash constraints."""
     return sizing.fit_buy(px, want_value, adv, cfg.max_participation,
                           cash, cfg.lot_size, costs)
 
@@ -121,9 +92,7 @@ class BacktestResult:
 
 def _metrics(equity: pd.Series, daily: pd.DataFrame, cfg: BacktestConfig) -> dict:
     rets = equity.pct_change().dropna()
-    # CAGR is a calendar-time quantity, so `years` is calendar days / 365.25.
-    # Counting trading days / 252 overstates CAGR on A-shares, which trade
-    # about 243 days a year.
+    # Use calendar time for CAGR, with a floor for very short samples.
     span_days = (equity.index[-1] - equity.index[0]).days
     years = max(span_days / 365.25, len(equity) / 252.0 * 0.5, 1e-9)
     total = equity.iloc[-1] / equity.iloc[0] - 1.0
@@ -131,9 +100,7 @@ def _metrics(equity: pd.Series, daily: pd.DataFrame, cfg: BacktestConfig) -> dic
     vol = rets.std() * np.sqrt(252) if len(rets) > 1 else 0.0
     dd = (equity / equity.cummax() - 1.0).min()
     cost_total = daily["cost"].sum()
-    # `sharpe` is the arithmetic daily Sharpe, annualised by sqrt(252), with a
-    # zero risk-free rate. CAGR / vol is a different, geometric quantity and is
-    # deliberately not reported under this name.
+    # Daily arithmetic Sharpe, annualised at 252 sessions with zero risk-free rate.
     sharpe = (rets.mean() * 252 / vol) if vol > 0 and len(rets) > 1 else 0.0
     return {
         "start": str(equity.index[0].date()),
@@ -156,37 +123,23 @@ def _metrics(equity: pd.Series, daily: pd.DataFrame, cfg: BacktestConfig) -> dic
 def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig | None = None,
                  exposure: pd.Series | None = None,
                  exit_flags: pd.DataFrame | None = None) -> BacktestResult:
-    """Run a cross-sectional long book.
+    """Run a long-only portfolio from stock scores and daily bars.
 
-    `signal` needs [date, code, score] (optional `w`); `bars` needs
-    [date, code, open, close, preclose, amount, tradable, open_limit_up,
-    open_limit_down] (`REQUIRED_BARS`). The limit flags must describe the OPEN.
-    Both are plain frames so this is testable without any database.
+    `signal` requires date, code, score, with an optional relative weight `w`.
+    `bars` requires the columns in REQUIRED_BARS. Limit flags describe the open;
+    preclose must use the ex-rights reference price for that day.
+    Supply signal rows for every trading day to advance valuation daily.
 
-    `exposure` is an optional Series indexed by signal date giving the fraction
-    of equity to hold in stocks, in [0, 1]; the remainder sits in cash. It is
-    how a risk control that SCALES exposure (volatility targeting, drawdown
-    de-risking) is expressed, as opposed to a binary in/out overlay.
+    `exposure` is a Series indexed by signal date, clipped to [0, 1]. Missing
+    entries use zero exposure. Reducing existing positions requires
+    cfg.rebalance_weights=True.
 
-    Scaling DOWN only works with `cfg.rebalance_weights=True`: the trim step is
-    what sells an existing book down to the smaller target. With trimming off,
-    a falling exposure would only slow new buying.
-
-    `exit_flags` is an optional frame of [date, code] meaning "sell this holding
-    at the next open", checked on EVERY signal day rather than only on rebalance
-    days. It is how an exit rule is expressed, separately from what to buy.
-
-    The freed capital sits in CASH until the next rebalance. That idle drag is
-    the honest cost of exiting early and is exactly what a cross-tab of
-    "how much each position gave back" cannot show.
-
-    The engine only SELLS here. Suppressing re-entry is the caller's job (drop
-    the name from `signal`, or NaN its score); keeping those two apart means the
-    engine never has to hold an opinion about how long a flag lasts.
-
-    Re-entry is deliberately not suppressed by default: an exit that sells a
-    spike can earn its keep by buying the SAME name back cheaper at the next
-    rebalance, when its rank has not changed.
+    `exit_flags` contains date and code. Each signal day, flagged holdings are
+    sold at the next open if tradable and settled. Repeat a flag on later dates
+    to retry a blocked exit. Cash waits for the next rebalance unless cfg.refill
+    is enabled, which buys replacements at the same open as the exit.
+    To prevent re-entry on later days, remove the stock from the signal or set
+    its score to NaN.
     """
     cfg = cfg or BacktestConfig()
     if not cfg.long_only:
@@ -205,57 +158,39 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
 
     bars = bars.sort_values(["date", "code"]).copy()
     bars["date"] = pd.to_datetime(bars["date"])
-    # Defensive: a NULL flag from any source must not crash a boolean cast, and
-    # "unknown" must never be read as "tradable" or "not at a limit".
+    # Missing flags block trading in the affected direction.
     for col, default in (("tradable", False), ("open_limit_up", True), ("open_limit_down", True)):
         if col in bars.columns:
-            # np.where, not fillna: fillna on an object column with None in it
-            # triggers pandas' downcasting FutureWarning on 2.x.
+            # np.where avoids the pandas 2.x fillna downcasting warning.
             bars[col] = np.where(bars[col].isna(), default, bars[col]).astype(bool)
     signal = signal.copy()
     signal["date"] = pd.to_datetime(signal["date"])
     if exposure is not None:
         exposure = exposure.copy()
         exposure.index = pd.to_datetime(exposure.index)
-        # Clipped, not trusted: an exposure above 1 would be leverage, which a
-        # cash A-share account does not have, and a negative one would be a
-        # short. Both fail closed rather than silently backtesting something
-        # the account cannot do.
+        # Keep exposure within the long-only, unlevered range.
         exposure = exposure.clip(lower=0.0, upper=1.0)
 
-    # Liquidity reference: trailing 20d median ¥ turnover, shifted so the cap
-    # on day t+1 uses only information available by t.
+    # Shift the turnover reference so execution-day amounts cannot affect sizing.
     bars["adv20"] = (
         bars.groupby("code")["amount"].transform(lambda s: s.rolling(20, min_periods=5).median().shift(1))
     )
 
-    # CORPORATE ACTIONS -- the second most important thing in this file.
-    #
-    # baostock serves RAW prices (adjustflag=3), so a split or a bonus issue
-    # moves the raw price with no economic event behind it. Valuing a position
-    # as shares x raw price therefore booked sh.603636's 2017-04-07 4-for-1
-    # split as a -72.5% day, and every dividend as a small loss.
-    #
-    # The adjustment is already in `preclose`, which baostock adjusts:
-    #     close_t / preclose_t == 1 + ret_t          (a TOTAL return)
-    # Splitting the day at the open gives two ratios that multiply back to it,
-    # while still letting a trade fill at the raw open price:
-    #     overnight   open_t / preclose_t     prior close -> today's open
-    #     intraday    close_t / open_t        inside one day; no action fits here
+    # With an ex-rights preclose, these ratios carry position value through
+    # splits and dividends while orders still use raw open prices:
+    #     open / preclose: prior close to this open
+    #     close / open:   this open to this close
     _pc = pd.to_numeric(bars["preclose"], errors="coerce")
-    # A missing ratio means "no information about the move", which is 1.0
-    # (carry the value) -- never NaN, which would poison the curve from that
-    # day on, and never 0.
+    # Missing ratios leave position value unchanged.
     bars["overnight"] = (bars["open"] / _pc).where(_pc > 0).fillna(1.0)
     bars["intraday"] = (bars["close"] / bars["open"]).where(bars["open"] > 0).fillna(1.0)
 
-    # Execution happens on the day AFTER the signal date.
+    # Map each date to the next trading date in the bars.
     days = sorted(bars["date"].unique())
     nxt = {d: days[i + 1] for i, d in enumerate(days[:-1])}
 
     bars_by_date = {d: g.set_index("code") for d, g in bars.groupby("date")}
-    # Final observed bar per code: used to distinguish "delisted" from
-    # "merely suspended today", since a suspended stock reappears later.
+    # A missing bar before the final date is carried; after it, the position is liquidated.
     last_bar_date = bars.groupby("code")["date"].max().to_dict()
     sig_by_date = {d: g for d, g in signal.groupby("date")}
     exit_by_date: dict[pd.Timestamp, set[str]] = {}
@@ -283,24 +218,19 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
             continue
         day_costs = cfg.costs.on(ex_day)
 
-        # Advance the existing book from last night's close to this morning's
-        # open, through any corporate action that happened in between.
+        # Mark existing holdings to the execution open.
         for code, h in list(holdings.items()):
             if code in ex.index:
                 h["value"] *= float(ex.at[code, "overnight"])
 
         cost_today = traded_notional = 0.0
 
-        # Idle cash earns its rate. 243.6 is the average A-share trading year;
-        # using 252 here would quietly pay
-        # eight days of interest a year that the calendar does not contain.
+        # Apply the configured cash rate using a 243.6-session year.
         if cfg.cash_annual_rate and cash > 0:
             cash *= 1.0 + cfg.cash_annual_rate / 243.6
 
-        # ---- exit rule: runs EVERY day, not only on rebalance days ----
-        # Same venue rules as any other sell: no selling into a limit-down or a
-        # halt, and T+1 still binds. A blocked exit is simply retried tomorrow
-        # if the caller still flags it -- it is never silently treated as done.
+        # Check exits on every signal day, including non-rebalance days.
+        # Blocked exits need another flag on a later signal day to be retried.
         exited_today: set[str] = set()
         for code in list(holdings):
             if code not in exit_by_date.get(d, ()):
@@ -327,17 +257,8 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
             del holdings[code]
             exited_today.add(code)
 
-        # ---- refill: put an exited slot back to work at the next open ----
-        #
-        # The alternative is that the freed cash waits for the next calendar
-        # rebalance. On a book whose score gradient is steep that wait is
-        # expensive; on one where the exit earns its keep by buying the SAME
-        # name back cheaper it is the point. Which dominates is measurable, so
-        # it is a flag rather than an assumption.
-        #
-        # The name just exited is never re-bought here: it was flagged for sale
-        # this morning, and buying it back the same morning would only pay the
-        # spread twice.
+        # Optionally buy replacements at the same open as the exit.
+        # Exclude stocks just sold so refill cannot immediately buy them back.
         if (cfg.refill and exited_today and d not in rebal_days
                 and len(holdings) < cfg.n_positions):
             sc = sig_by_date.get(d)
@@ -377,18 +298,14 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
             scored = sig_by_date[d].dropna(subset=["score"])
             elig = [c for c in scored["code"] if c in ex.index]
             avail = ex.loc[elig]
-            # An open at limit-up blocks BUYING it, not HOLDING it: a held name
-            # stays eligible for the target, or it would be sold at that open
-            # while still ranked. Top-ups of it are blocked further down.
+            # Keep ranked holdings at limit-up in the target; new buys and top-ups are blocked.
             held = avail.index.isin(list(holdings))
             ok = avail[avail["tradable"].astype(bool)
                        & (~avail["open_limit_up"].astype(bool) | held)]
             pool = scored[scored["code"].isin(ok.index)]
             if cfg.score_band is not None and len(pool) > 1:
                 lo, hi = cfg.score_band
-                # Percentile within THIS date's tradable cross-section, so the
-                # band means the same thing regardless of how many names
-                # happened to be tradable.
+                # Rank percentiles within this date's eligible pool.
                 pct = pool["score"].rank(pct=True)
                 banded = pool[(pct >= lo) & (pct <= hi)]
                 if len(banded) >= cfg.n_positions:
@@ -397,15 +314,8 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                 pool = pool[~pool["code"].isin(exited_today)]
             target = pool.nlargest(cfg.n_positions, "score")["code"].tolist()
 
-            # ---- target weights ----
-            # An optional `w` column on the signal frame sets RELATIVE position
-            # sizes; absent (or constant) it reproduces equal weight exactly.
-            #
-            # The normalisation keeps the "size against the BREADTH CAP" rule
-            # that the equal-weight path uses: k names out of n_positions stay
-            # k/n invested with the remainder in cash, rather than being
-            # renormalised up onto the survivors (which would silently lever an
-            # event book on days when few names qualify).
+            # Normalise relative weights to a mean of 1. Unfilled slots stay in cash,
+            # matching the equal-weight path.
             wmap: dict[str, float] = {}
             if "w" in pool.columns and target:
                 raw = pool.set_index("code")["w"].reindex(target)
@@ -414,7 +324,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                 if tot > 0 and raw.notna().all():
                     wmap = (raw / tot * len(target)).to_dict()   # mean 1.0
 
-            # ---- sells: exit anything not in target, unless blocked ----
+            # Sell holdings outside the target where trading rules allow.
             for code in list(holdings):
                 if code in target:
                     continue
@@ -439,29 +349,18 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                                    "notional": notional, "cost": c})
                 del holdings[code]
 
-            # ---- rebalance + buys: equal-weight the target ----
+            # Set target values, then trim and buy.
             keep = [c for c in target if c in holdings]
             need = [c for c in target if c not in holdings]
             equity_now = cash + sum(h["value"] for h in holdings.values())
-            # A missing exposure reading means no basis for a position, so it
-            # is 0, not 1.
+            # When exposure is supplied, missing dates use zero.
             expo = 1.0 if exposure is None else float(exposure.get(d, 0.0))
-            # Size against the BREADTH CAP, not against how many names happened
-            # to qualify, and leave the rest in cash.
-            #
-            # For a factor that ranks the whole market the two are identical.
-            # For an EVENT strategy, where most days only a handful of names
-            # qualify, dividing by the count found would put half the account
-            # into each of two names, and the backtest would measure that bet
-            # rather than the signal.
+            # Divide by the requested position count so unfilled slots stay in cash.
             per_name = equity_now * expo / max(cfg.n_positions, 1)
-            # Per-name target value. `wmap` has mean 1.0 over the target names,
-            # so the book's total target is unchanged and only its DISTRIBUTION
-            # moves; an empty wmap leaves every name at `per_name`.
+            # Relative weights redistribute the target value across selected stocks.
             tgt = lambda c: per_name * wmap.get(c, 1.0)
 
-            # Trim the overweight names FIRST: it raises the cash that the
-            # underweight ones and the new names are then funded from.
+            # Trim first to release cash for buys.
             if cfg.rebalance_weights:
                 for code in keep:
                     if code not in ex.index:
@@ -472,8 +371,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     px = float(row["open"])
                     if px <= 0:
                         continue
-                    # Lot rounding is done at the RAW price because the lot is
-                    # 100 REAL shares; the position itself is tracked in ¥.
+                    # Use raw prices for lot rounding; holdings are tracked in yuan.
                     excess = holdings[code]["value"] - tgt(code)
                     if excess < px * cfg.lot_size:
                         continue                   # under- or on-weight: handled below
@@ -493,8 +391,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     trade_rows.append({"date": ex_day, "code": code, "side": "sell",
                                        "notional": notional, "cost": c})
 
-            # Underweight held names are topped up alongside the new ones, so
-            # both directions of the drift are corrected in the same pass.
+            # Buy underweight holdings alongside new positions.
             top_up = []
             if cfg.rebalance_weights:
                 for code in keep:
@@ -514,10 +411,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     if px <= 0:
                         continue
                     adv = row["adv20"]
-                    # A TOP-UP must fund only the DEFICIT. Sizing it to
-                    # `per_name` would buy a second full position on top of the
-                    # one already held and double the weight it was meant to
-                    # correct.
+                    # For a top-up, buy only the gap to target value.
                     want_value = tgt(code)
                     if code in holdings:
                         want_value = tgt(code) - holdings[code]["value"]
@@ -530,8 +424,6 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     cost_today += c
                     traded_notional += notional
                     if code in holdings:
-                        # A top-up ADDS to the position. Overwriting it would
-                        # silently discard the value already held.
                         holdings[code]["value"] += notional
                         holdings[code]["bought_on"] = ex_day
                         holdings[code]["last_seen"] = ex_day
@@ -541,15 +433,9 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
                     trade_rows.append({"date": ex_day, "code": code, "side": "buy",
                                        "notional": notional, "cost": c})
 
-        # Hold through the execution day: mark to its close.
-        #
-        # DELISTING: when a held stock stops appearing in the data its history
-        # has ended, and carrying it at a frozen price forever would quietly
-        # understate delisting risk -- A-share delisting usually runs through a
-        # 退市整理期 in which the price collapses (sh.600193 fell to CNY 0.19).
-        # The bars DO contain that collapse, so a position held to the final bar
-        # already absorbs most of it; here we force a liquidation at the last
-        # observed price so the capital is released rather than stranded.
+        # Mark holdings to the close. If a stock's history has ended, release
+        # its last marked value as cash. This assumes a data endpoint is a delisting;
+        # it does not model an actual recovery payment.
         pos_val = 0.0
         for code, h in list(holdings.items()):
             if code in ex.index:
@@ -571,8 +457,7 @@ def run_backtest(signal: pd.DataFrame, bars: pd.DataFrame, cfg: BacktestConfig |
     daily = pd.DataFrame(rows).set_index("date").sort_index()
     if daily.empty:
         raise ValueError("backtest produced no days")
-    # The curve starts at the capital on the first signal date, so the first
-    # execution day's costs and return are inside every metric.
+    # Include starting capital so the first execution day contributes to all metrics.
     equity = pd.concat([pd.Series([float(cfg.capital)], index=[sig_days[0]]), daily["equity"]])
     equity.name = "equity"
     return BacktestResult(equity, daily, pd.DataFrame(trade_rows), cfg, _metrics(equity, daily, cfg))

@@ -1,9 +1,4 @@
-"""Execution-rule tests for the backtest engine.
-
-These encode the A-share rules that silently inflate returns when they are
-missing. Each test is built on a tiny synthetic panel so a failure points at
-one rule rather than at the data.
-"""
+"""Execution and accounting tests using small synthetic panels."""
 from __future__ import annotations
 
 import pandas as pd
@@ -14,12 +9,10 @@ from ashare_bt.engine import BacktestConfig, run_backtest
 
 
 def make_bars(spec: dict[str, list[dict]]) -> pd.DataFrame:
-    """spec: {code: [ {date, open, close, preclose, ret, ...}, ... ]}
+    """Build bars from {code: [{date, open, close, ...}, ...]}.
 
-    `preclose` defaults to the PREVIOUS bar's raw close, which is the
-    no-corporate-action case. Pass it explicitly to model a split or a
-    dividend: baostock's preclose is already adjusted for both, so
-    `preclose != prev_close` is exactly how a corporate action shows up.
+    preclose defaults to the previous raw close. Override it to model a split
+    or dividend.
     """
     rows = []
     for code, recs in spec.items():
@@ -162,15 +155,9 @@ def test_whole_lots_only():
 
 
 def test_t_plus_one_does_not_bind_in_this_engine_so_t0_changes_nothing():
-    """Convertibles settle T+0. One might expect the engine's T+1 rule to
-    understate them. It does not.
+    """T+0 and T+1 give the same result with once-daily, sell-before-buy execution.
 
-    The engine transacts once per execution day and runs SELLS BEFORE BUYS, so a name
-    bought on an execution day is never a sell candidate on that same day. The
-    `bought_on >= ex_day` guard is unreachable under a normal calendar, which means
-    settlement_t0 is inert here. It is kept because it documents the venue rule and
-    would bind if execution ever became intraday -- but it must not silently change
-    any existing result, which is what this test pins down.
+    A new purchase is never a sell candidate on the same execution day here.
     """
     bars = make_bars({
         "A": [{"date": d, "open": 10.0, "close": 10.0 + i * 0.1} for i, d in enumerate(DATES)],
@@ -195,8 +182,7 @@ def test_t_plus_one_does_not_bind_in_this_engine_so_t0_changes_nothing():
 
 
 def test_lot_size_is_configurable_for_convertible_bonds():
-    """Convertibles trade in lots of 10 (¥1,000 face), not 100 shares. With capital
-    that cannot fill a 100-lot, the bond lot must still allow a position."""
+    """A 10-unit lot permits orders too small for a 100-unit lot."""
     bars = make_bars({"A": flat_series("A", 130.0)})
     signal = pd.DataFrame({"date": [DATES[25]], "code": ["A"], "score": [1.0]})
     base = dict(capital=50_000, n_positions=10, rebalance_days=1)
@@ -224,8 +210,7 @@ def test_lot_size_must_be_positive():
 
 
 def test_zero_stamp_duty_is_cheaper_to_sell():
-    """Convertibles pay no stamp duty. It is already a CostModel field, so bond mode
-    needs no code change -- this test exists so that stays true."""
+    """Setting stamp_duty=0 removes the sell-side duty."""
     bars = make_bars({
         "A": [{"date": d, "open": 10.0, "close": 10.0} for d in DATES],
         "B": [{"date": d, "open": 10.0, "close": 10.0} for d in DATES],
@@ -249,11 +234,7 @@ def test_short_side_is_refused_rather_than_faked():
 
 
 def test_delisted_holding_is_liquidated_not_stranded():
-    """A stock whose data ends must release its capital, not freeze it.
-
-    Carrying a delisted name at a frozen price forever would let a backtest
-    park capital in a stock that no longer exists.
-    """
+    """When a stock history ends, its last marked value returns to cash."""
     # A trades for 10 days then disappears; B trades throughout so the loop
     # keeps advancing past A's final bar.
     bars = make_bars({
@@ -276,11 +257,7 @@ def test_delisted_holding_is_liquidated_not_stranded():
 
 
 def test_score_band_avoids_the_extreme_tail():
-    """A band must skip the highest-scoring names, which can be falling knives.
-
-    For a factor that inverts in the tail, selecting a band rather than the
-    extreme is a correctness requirement, not a preference.
-    """
+    """A score band excludes names outside the chosen percentile range."""
     codes = [f"C{i:03d}" for i in range(100)]
     bars = make_bars({c: [{"date": d, "open": 10.0, "close": 10.0} for d in DATES]
                       for c in codes})
@@ -300,10 +277,7 @@ def test_score_band_avoids_the_extreme_tail():
     assert max(int(c[1:]) for c in band_picks) <= 82
 
 
-# --------------------------------------------------------------------------
-# Weight rebalancing. Held positions are trimmed back toward target weight;
-# without this a stock that tripled would keep 3x weight forever and the book
-# would silently concentrate into past winners.
+# Weight rebalancing
 
 def _two_stock_bars(a_path, b_path):
     return make_bars({
@@ -313,11 +287,10 @@ def _two_stock_bars(a_path, b_path):
 
 
 def _weights(res, bars, day_idx):
-    """Value weights of the book after the rebalance on DATES[day_idx].
+    """Calculate portfolio value weights after the rebalance on DATES[day_idx].
 
-    Each trade's share count must be recovered at ITS OWN price, not at the
-    measurement day's; dividing every notional by the final price would
-    misreport an equal-weighted book.
+    Recover each trade's shares at its own fill price, then value at the
+    measurement date.
     """
     at = {(r["date"], r["code"]): r["open"] for _, r in bars.iterrows()}
     end_px = {r["code"]: r["open"] for _, r in
@@ -370,8 +343,7 @@ def test_rebalance_weights_false_reproduces_the_old_drift():
 
 
 def test_a_top_up_adds_to_the_position_rather_than_replacing_it():
-    """A halves; topping it back up must not discard the shares already held,
-    and must fund only the deficit rather than a second full position."""
+    """A top-up preserves the existing holding and buys only the deficit."""
     a = [20.0] * 5 + [10.0] * 35        # A halves on day 5
     b = [10.0] * 40
     bars = _two_stock_bars(a, b)
@@ -399,9 +371,7 @@ def test_rebalancing_never_spends_more_cash_than_it_has():
     assert (res.daily["cash"] >= -1e-6).all(), "went cash-negative while rebalancing"
 
 
-# --------------------------------------------------------------------------
-# Exposure scaling: a risk control that SCALES the book (e.g. volatility
-# targeting), as opposed to a binary in/out overlay.
+# Exposure scaling
 
 def test_exposure_half_holds_about_half_the_equity_in_stocks():
     bars = _two_stock_bars([10.0] * 40, [10.0] * 40)
@@ -444,16 +414,10 @@ def test_exposure_above_one_is_clipped_not_leveraged():
     assert (res.daily["cash"] >= -1e-6).all(), "leverage slipped through"
 
 
-# ---------------------------------------------------------------------------
-# CORPORATE ACTIONS
-#
-# Valuing a position as shares x RAW price, with raw (unadjusted) prices,
-# makes a 4-for-1 split look like a -75% day: the price quarters while the
-# stored share count does not quadruple. Dividends become small fake losses.
-# ---------------------------------------------------------------------------
+# Corporate actions
 
 def test_a_four_for_one_split_is_not_a_75_percent_loss():
-    """The real case: sh.603636 2017-04-07, prev close 96.92 -> close 26.61."""
+    """A four-for-one split leaves value unchanged when preclose is adjusted."""
     recs = []
     for i, d in enumerate(DATES):
         if i < 10:
@@ -464,8 +428,7 @@ def test_a_four_for_one_split_is_not_a_75_percent_loss():
         else:
             recs.append({"date": d, "open": 25.0, "close": 25.0})
     bars = make_bars({"A": recs})
-    # Signal on EVERY date: the engine emits one equity row per signal date, so
-    # a one-row signal makes every return assertion pass vacuously.
+    # Daily signal rows ensure the curve includes the price change.
     signal = pd.DataFrame({"date": DATES, "code": ["A"] * len(DATES),
                            "score": [1.0] * len(DATES)})
     cfg = BacktestConfig(capital=1_000_000, n_positions=1, rebalance_days=100,
@@ -486,8 +449,7 @@ def test_a_cash_dividend_is_not_a_loss():
         else:
             recs.append({"date": d, "open": 98.0, "close": 98.0})
     bars = make_bars({"A": recs})
-    # Signal on EVERY date: the engine emits one equity row per signal date, so
-    # a one-row signal makes every return assertion pass vacuously.
+    # Daily signal rows ensure the curve includes the price change.
     signal = pd.DataFrame({"date": DATES, "code": ["A"] * len(DATES),
                            "score": [1.0] * len(DATES)})
     cfg = BacktestConfig(capital=1_000_000, n_positions=1, rebalance_days=100,
@@ -497,14 +459,13 @@ def test_a_cash_dividend_is_not_a_loss():
 
 
 def test_a_genuine_price_fall_is_still_a_loss():
-    """The fix must not launder real losses: preclose == prev close here."""
+    """With no preclose adjustment, a price drop reduces position value."""
     recs = []
     for i, d in enumerate(DATES):
         px = 100.0 if i < 10 else 25.0
         recs.append({"date": d, "open": px, "close": px})
     bars = make_bars({"A": recs})            # preclose defaults to prev close = 100
-    # Signal on EVERY date: the engine emits one equity row per signal date, so
-    # a one-row signal makes every return assertion pass vacuously.
+    # Daily signal rows ensure the curve includes the price change.
     signal = pd.DataFrame({"date": DATES, "code": ["A"] * len(DATES),
                            "score": [1.0] * len(DATES)})
     cfg = BacktestConfig(capital=1_000_000, n_positions=1, rebalance_days=100,
@@ -524,8 +485,7 @@ def test_overnight_and_intraday_ratios_compose_to_the_total_return():
         else:
             recs.append({"date": d, "open": 50.0, "close": 50.0})
     bars = make_bars({"A": recs})
-    # Signal on EVERY date: the engine emits one equity row per signal date, so
-    # a one-row signal makes every return assertion pass vacuously.
+    # Daily signal rows ensure the curve includes the price change.
     signal = pd.DataFrame({"date": DATES, "code": ["A"] * len(DATES),
                            "score": [1.0] * len(DATES)})
     cfg = BacktestConfig(capital=1_000_000, n_positions=1, rebalance_days=100,
@@ -537,12 +497,7 @@ def test_overnight_and_intraday_ratios_compose_to_the_total_return():
 
 
 def test_a_thin_day_holds_cash_instead_of_concentrating():
-    """Few qualifying names must mean a small book, not giant bets.
-
-    An event strategy fires on a handful of names most days. Dividing equity
-    by the number of names FOUND would turn two qualifying names into two 50%
-    positions.
-    """
+    """Fewer qualifying stocks leave unfilled target slots in cash."""
     bars = make_bars({c: [{"date": d, "open": 10.0, "close": 10.0} for d in DATES]
                       for c in ("A", "B", "C")})
     rows = []
@@ -579,13 +534,9 @@ def test_a_full_breadth_signal_is_unaffected_by_the_cap_change():
 
 
 def test_an_event_rule_buys_holds_and_returns_to_cash():
-    """The non-ranking shape: buy on an event, hold N days, else sit in cash.
+    """An event signal buys, holds for a fixed period, then returns to cash.
 
-    This is the canonical event strategy, and it pins all four things it needs
-    at once -- a complete calendar, timely entry, no daily churn, and cash
-    rather than concentration when nothing qualifies. Sizing by the names
-    FOUND instead of the breadth cap would turn one live event into a
-    100%-of-account position.
+    Check the full daily calendar, entry timing, position sizing, and turnover.
     """
     days = pd.bdate_range("2024-01-01", periods=60).strftime("%Y-%m-%d").tolist()
     events, hold = {"A": 10, "B": 30}, 20
@@ -601,9 +552,7 @@ def test_an_event_rule_buys_holds_and_returns_to_cash():
 
     bars = make_bars({c: series(c) for c in ("A", "B", "C")})
 
-    # A row for EVERY (date, code); NaN means "no opinion". Omitting the row
-    # instead would drop the date from the equity curve entirely -- 40 rows for
-    # 59 trading days -- and inflate the annualisation.
+    # Keep all dates in the curve; NaN marks stocks without an active event.
     import numpy as np
     rows = []
     for i, d in enumerate(days):
@@ -619,18 +568,12 @@ def test_an_event_rule_buys_holds_and_returns_to_cash():
     res = run_backtest(sig, bars, cfg)
     d = res.daily
 
-    # Complete calendar: one row per available trading day, not per event day.
-    # `len(d)` is what actually guards that; the `years` assertion below just
-    # pins the annualisation convention.
+    # The curve should cover all execution days, including those without events.
     assert len(d) == len(days) - 1
-    # CALENDAR span, not trading-day count / 252. The old assertion encoded
-    # `(len(days) - 1) / 252.0`: A-shares trade ~243.6 days a year, so dividing
-    # by 252 understates `years` and overstates CAGR. A side effect is that a
-    # calendar span cannot be inflated by dropping dates from the MIDDLE of the
-    # curve, which is the failure mode the comment above describes.
+    # CAGR uses the calendar span from the first signal to the last execution.
     span = (pd.Timestamp(days[-1]) - pd.Timestamp(days[0])).days   # the curve starts at the signal date
     assert abs(res.metrics["years"] - span / 365.25) < 1e-9
-    # Genuinely flat in cash when nothing qualifies.
+    # All cash when no event is active.
     assert (d["n_positions"] == 0).sum() == 19
     assert d.iloc[0]["n_positions"] == 0 and d.iloc[-1]["n_positions"] == 0
     # One position at a time, sized to the cap (1/5), not to the count found.
@@ -638,14 +581,14 @@ def test_an_event_rule_buys_holds_and_returns_to_cash():
     assert held["n_positions"].max() == 1
     inv = (held["equity"] - held["cash"]) / held["equity"]
     assert 0.19 < inv.min() and inv.max() < 0.23
-    # Entry the day AFTER the event, and four trades for the whole run.
+    # Entry on the next trading day; two buys and two sells in total.
     t = res.trades
     assert len(t) == 4
     assert str(t.iloc[0]["date"].date()) == "2024-01-16"
     assert list(t["side"]) == ["buy", "sell", "buy", "sell"]
 
 
-# ---------------------------------------------------------------- exit rules
+# Exit rules
 
 def _two_name_book(aaa_recs=None):
     """AAA and BBB both flat, a signal every day so an exit has a date to act on."""
@@ -657,7 +600,7 @@ def _two_name_book(aaa_recs=None):
 
 
 def test_an_exit_flag_sells_off_a_rebalance_day_and_the_cash_sits_idle():
-    """The whole point: the calendar-only engine could not express this."""
+    """Exit flags can sell between rebalances; proceeds stay in cash by default."""
     bars, sig = _two_name_book()
     cfg = BacktestConfig(capital=100_000.0, n_positions=2, rebalance_days=30,
                          costs=CostModel(slippage_bps=0.0))
@@ -666,14 +609,14 @@ def test_an_exit_flag_sells_off_a_rebalance_day_and_the_cash_sits_idle():
 
     exits = out.trades[out.trades["side"] == "exit"]
     assert len(exits) == 1 and exits.iloc[0]["code"] == "AAA"
-    # Sold and NOT replaced before the next rebalance: the freed capital idles.
+    # Proceeds stay in cash until the next rebalance.
     after = out.daily.loc[pd.Timestamp(DATES[7]):pd.Timestamp(DATES[20])]
     assert (after["n_positions"] == 1).all()
     assert after["cash"].min() > 0.4 * cfg.capital
 
 
 def test_an_exit_blocked_by_limit_down_is_not_treated_as_done():
-    """A flag that could not fill must stay fillable, never silently consumed."""
+    """A blocked exit can be retried by flagging the holding on a later day."""
     recs = flat_series("AAA", 10.0)
     recs[6]["open_limit_down"] = True          # the execution day for a day-5 signal
     bars, sig = _two_name_book(recs)
@@ -690,7 +633,7 @@ def test_an_exit_blocked_by_limit_down_is_not_treated_as_done():
 
 
 def test_no_exit_flags_reproduces_the_old_curve_exactly():
-    """Backwards compatibility: the feature is invisible when unused."""
+    """Omitting exit flags and passing an empty frame give the same curve."""
     bars, sig = _two_name_book()
     cfg = BacktestConfig(capital=100_000.0, n_positions=2, rebalance_days=5)
     a = run_backtest(sig, bars, cfg)
@@ -699,10 +642,9 @@ def test_no_exit_flags_reproduces_the_old_curve_exactly():
 
 
 def test_a_held_name_opening_at_limit_up_is_kept_not_sold():
-    """An open at limit-up blocks BUYING, not HOLDING.
+    """A held stock at limit-up stays eligible if its score still qualifies.
 
-    The rebalance pool used to drop every name at limit-up, held or not, so a
-    held name still ranked first left the target and was sold at that open.
+    Regression: excluding it from the target pool caused an unwanted sale.
     """
     bars = make_bars({
         "A": [{"date": d, "open": 10.0, "close": 10.0, "open_limit_up": i >= 2}
@@ -719,7 +661,7 @@ def test_a_held_name_opening_at_limit_up_is_kept_not_sold():
 
 
 def test_sharpe_is_the_arithmetic_daily_sharpe():
-    """`sharpe` must be the textbook statistic, so it can be compared with outside numbers."""
+    """Sharpe uses daily arithmetic returns and 252-day annualisation."""
     import numpy as np
     rng = np.random.default_rng(3)
     path = 10.0 * np.cumprod(1 + rng.normal(0.001, 0.02, len(DATES)))

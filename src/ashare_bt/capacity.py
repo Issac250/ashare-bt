@@ -1,20 +1,8 @@
-"""Alpha-vs-capital decay curve.
+"""Compare a signal at different capital levels and buying caps.
 
-This is the module that answers "how much money can this actually take",
-which for a capacity-limited strategy is the question that decides whether
-an edge is worth trading at all. A Sharpe quoted without a capital level is
-not a result.
-
-Method: re-run the SAME signal at increasing capital, holding everything else
-fixed, and report how performance decays. Two mechanisms cause the decay and
-both are modelled in the engine:
-
-  * the participation cap forces the book into larger, more liquid names as
-    size grows, diluting a small-cap edge;
-  * market impact scales with participation, so costs rise super-linearly.
-
-Also sweeps `max_participation`, since how aggressively you are willing to
-be a share of daily turnover trades off impact against breadth.
+Larger orders incur more modelled impact. The buying cap can also leave
+cash uninvested, so the sweep reports deployed capital alongside returns
+and costs. Rankings and all other configuration stay the same.
 """
 from __future__ import annotations
 
@@ -54,13 +42,11 @@ def sweep(signal: pd.DataFrame, bars: pd.DataFrame,
     rows: list[CapacityPoint] = []
     for part in participations:
         for cap in capitals:
-            # Only the two swept axes change; every other setting (venue rules,
-            # weighting, refill, cash rate) is the caller's.
+            # Preserve all base settings except capital and participation.
             cfg = replace(base, capital=cap, max_participation=part)
             res = run_backtest(signal, bars, cfg)
             m = res.metrics
-            # Cash left idle because the participation cap blocked deployment
-            # is itself a capacity signal, so report it rather than hide it.
+            # Report invested capital as well as returns.
             deployed = 1.0 - (res.daily["cash"].mean() / max(res.equity.mean(), 1))
             rows.append(CapacityPoint(
                 capital=cap, participation=part, cagr=m["cagr"], sharpe=m["sharpe"],
@@ -73,7 +59,7 @@ def sweep(signal: pd.DataFrame, bars: pd.DataFrame,
 
 
 def render(df: pd.DataFrame) -> str:
-    """Human-readable decay table, plus the capital where Sharpe halves."""
+    """Format sweep results and show where Sharpe drops below half its starting value."""
     if df.empty:
         return "  (no capacity points computed)"
     out = ["=" * 84, "CAPACITY / ALPHA DECAY", "=" * 84,

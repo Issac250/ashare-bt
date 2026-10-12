@@ -1,4 +1,4 @@
-"""ashare-bt: a cross-sectional backtester for China A-shares."""
+"""ashare-bt：基于日线行情和选股评分的 A 股组合回测。"""
 from .costs import CostModel
 from .engine import BacktestConfig, BacktestResult, run_backtest
 
