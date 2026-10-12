@@ -1,4 +1,4 @@
-"""How the same signal decays as capital grows: participation cap plus market impact."""
+"""同一个动量信号，从 10 万到 1 亿资金各跑一遍。"""
 from ashare_bt import BacktestConfig
 from ashare_bt.capacity import render, sweep
 from ashare_bt.synthetic import make_market, make_signal

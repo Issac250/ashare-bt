@@ -1,11 +1,10 @@
-"""Run the engine on real daily bars fetched with baostock.
+"""用 baostock 拉取五只股票的日线，再跑动量回测。
 
-Needs `pip install baostock` and network access. baostock forbids
-concurrent connections: keep this single-threaded and do not loop it over the
-whole market without a rate limit.
+先安装 pip install -e '.[baostock]'，运行时需要联网。
+baostock 不支持并发连接，请按顺序请求。
 
-Limit width here is 10% (main board, non-ST). ChiNext since 2020-08-24 and
-STAR are 20%, ST names 5%: set `limit_width` per code if you include them.
+示例固定使用 10% 涨跌停幅度。更换股票或日期范围时，
+需要重新核对板块、ST 状态和对应时期的交易规则。
 """
 import baostock as bs
 import pandas as pd

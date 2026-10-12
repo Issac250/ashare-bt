@@ -1,4 +1,4 @@
-"""Quickstart: a 20-day momentum book on synthetic A-share bars."""
+"""用合成行情跑一个 20 日动量组合，每 5 个信号日调仓。"""
 from ashare_bt import BacktestConfig, run_backtest
 from ashare_bt.synthetic import make_market, make_signal
 
